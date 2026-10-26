@@ -1,7 +1,8 @@
-import { useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
+import type { z } from "zod";
+import { useStockAttempt } from "@/hooks/use-stock-attempt";
+import { receiveFormSchema as schema } from "@/lib/stock-validation";
 import { ArrowDownToLine, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useLocations, useReceiveStock } from "@/hooks/use-warehouse";
@@ -9,16 +10,6 @@ import { APIError } from "@/services/api";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { ErrorState } from "./states";
-const schema = z.object({
-  location_id: z.string().uuid("Choose a location"),
-  qty: z
-    .string()
-    .regex(
-      /^[0-9]{1,15}(\.[0-9]{1,3})?$/,
-      "Use up to 15 integer and 3 decimal digits",
-    )
-    .refine((v) => /[1-9]/.test(v), "Quantity must be greater than zero"),
-});
 type FormValues = z.infer<typeof schema>;
 export function ReceiveDialog({
   open,
@@ -33,7 +24,8 @@ export function ReceiveDialog({
 }) {
   const locations = useLocations(open);
   const mutation = useReceiveStock();
-  const attempt = useRef<{ signature: string; key: string } | null>(null);
+  const saved = useStockAttempt("receive", itemID);
+  const pending = saved.attempt;
   const {
     register,
     handleSubmit,
@@ -42,33 +34,46 @@ export function ReceiveDialog({
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { location_id: "", qty: "" },
+    defaultValues: pending?.input ?? { location_id: "", qty: "" },
   });
   async function submit(values: FormValues) {
-    const input = { item_id: itemID, ...values };
-    const signature = JSON.stringify(input);
-    if (attempt.current?.signature !== signature)
-      attempt.current = { signature, key: crypto.randomUUID() };
+    let attempt: typeof pending = null;
     try {
+      attempt = saved.prepare({ item_id: itemID, ...values });
       const result = await mutation.mutateAsync({
-        input,
-        key: attempt.current.key,
+        input: attempt.input,
+        key: attempt.key,
       });
+      const storageError = saved.resolve(attempt.key);
+      if (storageError) {
+        toast.error(storageError.message);
+        return;
+      }
       toast.success(result.message);
-      attempt.current = null;
-      reset();
+      reset({ location_id: "", qty: "" });
       onOpenChange(false);
     } catch (error) {
-      if (error instanceof APIError) {
+      if (
+        error instanceof APIError &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408
+      ) {
+        if (attempt) {
+          const storageError = saved.resolve(attempt.key);
+          if (storageError) {
+            toast.error(storageError.message);
+            return;
+          }
+        }
         for (const field of error.fields)
           if (field.field === "qty" || field.field === "location_id")
             setError(field.field, { message: field.reason });
-        if (error.status === 0 || error.status >= 500) {
-          toast.error(
-            "Receipt outcome is unknown. Retry with the same values to safely check the result.",
-          );
-          return;
-        }
+      } else if (attempt) {
+        toast.error(
+          "Receipt outcome is unknown. Use the saved request to safely check the result.",
+        );
+        return;
       }
       toast.error((error as Error).message);
     }
@@ -82,23 +87,45 @@ export function ReceiveDialog({
       title="Receive stock"
       description="Choose a location and enter the quantity arriving at your warehouse."
     >
-      {locations.isError ? (
+      {saved.error ? (
+        <ErrorState error={saved.error} />
+      ) : locations.isError && !pending ? (
         <ErrorState
           error={locations.error}
           retry={() => void locations.refetch()}
         />
       ) : (
         <form
-          onSubmit={handleSubmit(submit)}
+          onSubmit={
+            pending
+              ? (event) => {
+                  event.preventDefault();
+                  void submit(pending.input);
+                }
+              : handleSubmit(submit)
+          }
           noValidate
           className="mt-7 space-y-5"
         >
+          {pending && (
+            <p
+              role="status"
+              className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950"
+            >
+              This request is saved. Checking its result uses the original
+              values and will not apply it twice. You can return to this item
+              after navigating away or reloading this tab.
+            </p>
+          )}
+
           <div>
             <label htmlFor="location">Storage location</label>
             <select
               id="location"
               {...register("location_id")}
-              disabled={locations.isPending || mutation.isPending}
+              disabled={
+                Boolean(pending) || locations.isPending || mutation.isPending
+              }
               aria-invalid={Boolean(errors.location_id)}
               aria-describedby={
                 errors.location_id ? "location-error" : undefined
@@ -139,7 +166,7 @@ export function ReceiveDialog({
               inputMode="decimal"
               placeholder="0.000"
               {...register("qty")}
-              disabled={mutation.isPending}
+              disabled={Boolean(pending) || mutation.isPending}
               aria-invalid={Boolean(errors.qty)}
               aria-describedby={errors.qty ? "qty-error" : "qty-help"}
             />
@@ -165,9 +192,9 @@ export function ReceiveDialog({
             <Button
               type="submit"
               disabled={
-                locations.isPending ||
-                !locations.data?.data.length ||
-                mutation.isPending
+                mutation.isPending ||
+                (!pending &&
+                  (locations.isPending || !locations.data?.data.length))
               }
             >
               {mutation.isPending ? (
@@ -175,7 +202,7 @@ export function ReceiveDialog({
               ) : (
                 <ArrowDownToLine />
               )}
-              Receive stock
+              {pending ? "Check saved receipt" : "Receive stock"}
             </Button>
           </div>
         </form>

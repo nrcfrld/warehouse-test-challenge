@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorState, Loading } from "@/components/states";
 import { DeleteDialog } from "@/components/delete-dialog";
 import { TransferDialog } from "@/components/transfer-dialog";
+import { PendingStockNotice } from "@/components/pending-stock-notice";
 import { ReceiveDialog } from "@/components/receive-dialog";
 import { quantity } from "@/lib/utils";
 export default function ItemDetailPage() {
@@ -72,6 +73,11 @@ export default function ItemDetailPage() {
                 </IconButton>
               </div>
             </div>
+            <PendingStockNotice
+              itemID={id}
+              onReceive={() => setReceiving(true)}
+              onTransfer={() => setTransferring(true)}
+            />
             <div className="grid items-start gap-6 lg:grid-cols-[1fr_300px]">
               <section className="panel" aria-labelledby="stock-heading">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b px-6 py-5">
@@ -212,6 +218,7 @@ export default function ItemDetailPage() {
               </aside>
             </div>
             <TransferDialog
+              key={`transfer:${id}`}
               open={transferring}
               onOpenChange={setTransferring}
               itemID={id}
@@ -219,6 +226,7 @@ export default function ItemDetailPage() {
               stock={stock.data?.data}
             />
             <ReceiveDialog
+              key={`receive:${id}`}
               open={receiving}
               onOpenChange={setReceiving}
               itemID={id}

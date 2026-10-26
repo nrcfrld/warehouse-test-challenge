@@ -1,6 +1,106 @@
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { randomUUID } from "node:crypto";
+
+for (const operation of ["receive", "transfer"] as const) {
+  test(`recover ${operation} after a committed response is lost and the page is reloaded`, async ({
+    page,
+    request,
+  }) => {
+    const created = await request.post("/api/v1/items", {
+      data: {
+        sku: `RECOVERY-${randomUUID()}`,
+        name: "Recovery verification",
+        category: "E2E recovery",
+        unit: "kg",
+      },
+    });
+    expect(created.status()).toBe(201);
+    const item = (await created.json()).data;
+    const source = "10000000-0000-4000-8000-000000000001";
+    const destination = "10000000-0000-4000-8000-000000000002";
+    const keys: (string | undefined)[] = [];
+    let committed = false;
+    try {
+      if (operation === "transfer") {
+        const seeded = await request.post("/api/v1/stock/receive", {
+          data: { item_id: item.id, location_id: source, qty: "1" },
+          headers: { "Idempotency-Key": randomUUID() },
+        });
+        expect(seeded.ok()).toBe(true);
+      }
+      await page.route(`**/api/v1/stock/${operation}`, async (route) => {
+        keys.push(route.request().headers()["idempotency-key"]);
+        const result = await route.fetch();
+        expect(result.ok()).toBe(true);
+        if (keys.length === 1) {
+          committed = true;
+          await route.abort("connectionfailed");
+        } else {
+          expect(result.headers()["idempotency-replayed"]).toBe("true");
+          await route.fulfill({ response: result });
+        }
+      });
+      await page.goto(`/items/${item.id}`);
+      const title =
+        operation === "receive" ? "Receive stock" : "Transfer stock";
+      await page.getByRole("button", { name: title, exact: true }).click();
+      let dialog = page.getByRole("dialog", { name: title, exact: true });
+      if (operation === "receive") {
+        await dialog.getByLabel("Storage location").selectOption(source);
+      } else {
+        await dialog.getByLabel("From location").selectOption(source);
+        await dialog.getByLabel("To location").selectOption(destination);
+      }
+      await dialog.getByLabel(/Quantity/).fill("0.100");
+      await dialog.getByRole("button", { name: title, exact: true }).click();
+      const check =
+        operation === "receive"
+          ? "Check saved receipt"
+          : "Check saved transfer";
+      await expect(dialog.getByRole("button", { name: check })).toBeEnabled();
+      await expect.poll(() => committed).toBe(true);
+      await expect(page.getByText(/outcome is unknown/)).toBeVisible();
+      await page.reload();
+      await page
+        .getByRole("button", {
+          name: operation === "receive" ? "Check receipt" : "Check transfer",
+          exact: true,
+        })
+        .click();
+      dialog = page.getByRole("dialog", { name: title, exact: true });
+      await expect(dialog.getByLabel(/Quantity/)).toHaveValue("0.100");
+      await expect(dialog.getByLabel(/Quantity/)).toBeDisabled();
+      expect(keys).toHaveLength(1);
+      await dialog.getByRole("button", { name: check }).click();
+      await expect(dialog).not.toBeVisible();
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBeTruthy();
+      expect(keys[1]).toBe(keys[0]);
+      const stock = (
+        await (await request.get(`/api/v1/stock/${item.id}`)).json()
+      ).data;
+      expect(stock.total).toBe(operation === "receive" ? "0.100" : "1.000");
+      const balance = (id: string) =>
+        stock.locations.find(
+          (entry: { location: { id: string } }) => entry.location.id === id,
+        ).qty;
+      expect(balance(source)).toBe(operation === "receive" ? "0.100" : "0.900");
+      if (operation === "transfer") expect(balance(destination)).toBe("0.100");
+      expect(
+        await page.evaluate(
+          () =>
+            Object.keys(sessionStorage).filter((key) =>
+              key.startsWith("warehouse:stock-attempt:v1:"),
+            ).length,
+        ),
+      ).toBe(0);
+    } finally {
+      await request.delete(`/api/v1/items/${item.id}`);
+    }
+  });
+}
+
 test("create, find, edit, receive exact stock, and soft-delete an item", async ({
   page,
   request,

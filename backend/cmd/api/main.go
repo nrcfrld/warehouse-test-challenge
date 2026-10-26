@@ -64,8 +64,12 @@ func run() error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	store := &repository.Postgres{Pool: pool}
-	svc := &service.Service{Store: store, Logger: logger}
+	itemRepository := &repository.ItemRepository{Pool: pool}
+	stockRepository := &repository.StockRepository{Pool: pool}
+	locationRepository := &repository.LocationRepository{Pool: pool}
+	itemService := &service.ItemService{Repository: itemRepository, Logger: logger}
+	locationService := &service.LocationService{Repository: locationRepository, Logger: logger}
+	stockService := &service.StockService{Repository: stockRepository, Logger: logger}
 	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
 		ttl := time.Minute
 		if value := os.Getenv("REDIS_CACHE_TTL"); value != "" {
@@ -83,14 +87,21 @@ func run() error {
 				logger.Warn("cache.close_failed", "error", closeErr)
 			}
 		}()
-		svc.Cache = lookupCache
+		itemService.Cache = lookupCache
+		locationService.Cache = lookupCache
 		if cacheErr = lookupCache.Ping(ctx); cacheErr != nil {
 			logger.Warn("cache.unavailable", "message", "Lookup requests will fall back to PostgreSQL", "error", cacheErr)
 		} else {
 			logger.Info("cache.ready", "ttl", ttl.String())
 		}
 	}
-	api := &httpapi.API{Service: svc, Logger: logger, Ping: pool.Ping}
+	api := &httpapi.API{
+		Items:     &httpapi.ItemHandler{Service: itemService},
+		Locations: &httpapi.LocationHandler{Service: locationService},
+		Stock:     &httpapi.StockHandler{Service: stockService},
+		Logger:    logger,
+		Ping:      pool.Ping,
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

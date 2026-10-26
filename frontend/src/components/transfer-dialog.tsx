@@ -1,7 +1,8 @@
-import { useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
+import type { z } from "zod";
+import { useStockAttempt } from "@/hooks/use-stock-attempt";
+import { transferFormSchema as schema } from "@/lib/stock-validation";
 import { ArrowRightLeft, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useLocations, useTransferStock } from "@/hooks/use-warehouse";
@@ -11,22 +12,6 @@ import { quantity } from "@/lib/utils";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { ErrorState } from "./states";
-const schema = z
-  .object({
-    from_location_id: z.string().uuid("Choose a source location"),
-    to_location_id: z.string().uuid("Choose a destination location"),
-    qty: z
-      .string()
-      .regex(
-        /^[0-9]{1,15}(\.[0-9]{1,3})?$/,
-        "Use up to 15 integer and 3 decimal digits",
-      )
-      .refine((v) => /[1-9]/.test(v), "Quantity must be greater than zero"),
-  })
-  .refine((v) => v.from_location_id !== v.to_location_id, {
-    path: ["to_location_id"],
-    message: "Choose a different destination location",
-  });
 type Values = z.infer<typeof schema>;
 export function TransferDialog({
   open,
@@ -43,7 +28,8 @@ export function TransferDialog({
 }) {
   const locations = useLocations(open);
   const mutation = useTransferStock();
-  const attempt = useRef<{ signature: string; key: string } | null>(null);
+  const saved = useStockAttempt("transfer", itemID);
+  const pending = saved.attempt;
   const {
     register,
     handleSubmit,
@@ -53,26 +39,44 @@ export function TransferDialog({
     formState: { errors },
   } = useForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: { from_location_id: "", to_location_id: "", qty: "" },
+    defaultValues: pending?.input ?? {
+      from_location_id: "",
+      to_location_id: "",
+      qty: "",
+    },
   });
   const source = watch("from_location_id");
   const sourceStock = stock?.locations.find((s) => s.location.id === source);
   async function submit(values: Values) {
-    const input = { item_id: itemID, ...values };
-    const signature = JSON.stringify(input);
-    if (attempt.current?.signature !== signature)
-      attempt.current = { signature, key: crypto.randomUUID() };
+    let attempt: typeof pending = null;
     try {
+      attempt = saved.prepare({ item_id: itemID, ...values });
       const result = await mutation.mutateAsync({
-        input,
-        key: attempt.current.key,
+        input: attempt.input,
+        key: attempt.key,
       });
+      const storageError = saved.resolve(attempt.key);
+      if (storageError) {
+        toast.error(storageError.message);
+        return;
+      }
       toast.success(result.message);
-      attempt.current = null;
-      reset();
+      reset({ from_location_id: "", to_location_id: "", qty: "" });
       onOpenChange(false);
     } catch (error) {
-      if (error instanceof APIError) {
+      if (
+        error instanceof APIError &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408
+      ) {
+        if (attempt) {
+          const storageError = saved.resolve(attempt.key);
+          if (storageError) {
+            toast.error(storageError.message);
+            return;
+          }
+        }
         for (const field of error.fields)
           if (
             field.field === "qty" ||
@@ -80,12 +84,11 @@ export function TransferDialog({
             field.field === "to_location_id"
           )
             setError(field.field, { message: field.reason });
-        if (error.status === 0 || error.status >= 500) {
-          toast.error(
-            "Transfer outcome is unknown. Retry with the same values to safely check the result.",
-          );
-          return;
-        }
+      } else if (attempt) {
+        toast.error(
+          "Transfer outcome is unknown. Use the saved request to safely check the result.",
+        );
+        return;
       }
       toast.error((error as Error).message);
     }
@@ -99,7 +102,9 @@ export function TransferDialog({
       title="Transfer stock"
       description="Move stock between locations. The total quantity stays the same."
     >
-      {locations.isError ? (
+      {saved.error ? (
+        <ErrorState error={saved.error} />
+      ) : locations.isError && !pending ? (
         <ErrorState
           error={locations.error}
           retry={() => void locations.refetch()}
@@ -107,9 +112,27 @@ export function TransferDialog({
       ) : (
         <form
           noValidate
-          onSubmit={handleSubmit(submit)}
+          onSubmit={
+            pending
+              ? (event) => {
+                  event.preventDefault();
+                  void submit(pending.input);
+                }
+              : handleSubmit(submit)
+          }
           className="mt-7 space-y-5"
         >
+          {pending && (
+            <p
+              role="status"
+              className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950"
+            >
+              This request is saved. Checking its result uses the original
+              values and will not apply it twice. You can return to this item
+              after navigating away or reloading this tab.
+            </p>
+          )}
+
           {(
             [
               { name: "from_location_id", label: "From location" },
@@ -121,7 +144,9 @@ export function TransferDialog({
               <select
                 id={field.name}
                 {...register(field.name)}
-                disabled={locations.isPending || mutation.isPending}
+                disabled={
+                  Boolean(pending) || locations.isPending || mutation.isPending
+                }
                 aria-invalid={Boolean(errors[field.name])}
                 aria-describedby={
                   errors[field.name] ? `${field.name}-error` : undefined
@@ -169,7 +194,7 @@ export function TransferDialog({
               inputMode="decimal"
               placeholder="0.000"
               {...register("qty")}
-              disabled={mutation.isPending}
+              disabled={Boolean(pending) || mutation.isPending}
               aria-invalid={Boolean(errors.qty)}
               aria-describedby={
                 errors.qty ? "transfer-qty-error" : "transfer-qty-help"
@@ -205,9 +230,10 @@ export function TransferDialog({
             <Button
               type="submit"
               disabled={
-                locations.isPending ||
-                (locations.data?.data.length ?? 0) < 2 ||
-                mutation.isPending
+                mutation.isPending ||
+                (!pending &&
+                  (locations.isPending ||
+                    (locations.data?.data.length ?? 0) < 2))
               }
             >
               {mutation.isPending ? (
@@ -215,7 +241,7 @@ export function TransferDialog({
               ) : (
                 <ArrowRightLeft />
               )}
-              Transfer stock
+              {pending ? "Check saved transfer" : "Transfer stock"}
             </Button>
           </div>
         </form>

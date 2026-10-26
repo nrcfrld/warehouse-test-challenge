@@ -7,14 +7,11 @@ Dashboard manajemen item, lokasi, penerimaan stok, dan transfer antar lokasi den
 - [Jalankan dengan Docker](#jalankan-dengan-docker)
 - [Development lokal](#development-lokal)
 - [Arsitektur](#arsitektur)
+  - [Model, handler, service, dan repository per fitur](#model-handler-service-dan-repository-per-fitur)
   - [Alur pembacaan lokasi dan kategori](#alur-pembacaan-lokasi-dan-kategori)
   - [Alur transfer stok](#alur-transfer-stok)
   - [Mengapa memilih monorepo](#mengapa-memilih-monorepo)
   - [Mengapa memakai Turborepo](#mengapa-memakai-turborepo)
-- [Kontrak dan aturan bisnis](#kontrak-dan-aturan-bisnis)
-  - [Transaksi dan retry](#transaksi-dan-retry)
-  - [Pencarian dan filter kategori](#pencarian-dan-filter-kategori)
-  - [Menggunakan Locations dan transfer](#menggunakan-locations-dan-transfer)
 - [Redis](#redis)
 - [Trade-off implementasi](#trade-off-implementasi)
 - [Pengujian dan quality gates](#pengujian-dan-quality-gates)
@@ -82,17 +79,29 @@ Hentikan service backend/frontend Compose sebelum memakai port API 8080 untuk de
 ```mermaid
 flowchart LR
     Browser["Browser / React"] --> Proxy["Vite proxy (development)<br/>Nginx (Docker)"]
-    Proxy --> Handler
+    Proxy --> Router
 
     subgraph Backend["Backend Go"]
-        Handler["HTTP handler<br/>Decode request, validasi transport, envelope"]
-        Service["Service<br/>Validasi aturan bisnis dan koordinasi cache"]
-        Repository["Repository / pgx<br/>SQL dan transaksi"]
-        Handler --> Service --> Repository
+        Router["HTTP router<br/>Middleware dan envelope bersama"]
+        ItemHandler["ItemHandler"]
+        LocationHandler["LocationHandler"]
+        StockHandler["StockHandler"]
+        ItemService["ItemService<br/>Item dan kategori"]
+        LocationService["LocationService<br/>Lokasi"]
+        StockService["StockService<br/>Saldo, receive, transfer"]
+        ItemRepository["ItemRepository / pgx"]
+        LocationRepository["LocationRepository / pgx"]
+        StockRepository["StockRepository / pgx"]
+        Router --> ItemHandler --> ItemService --> ItemRepository
+        Router --> LocationHandler --> LocationService --> LocationRepository
+        Router --> StockHandler --> StockService --> StockRepository
     end
 
-    Service <-->|"Cache lokasi dan kategori"| Redis[("Redis")]
-    Repository <-->|"Data utama, stok, audit, idempotensi"| PostgreSQL[("PostgreSQL")]
+    ItemService <-->|"Cache kategori"| Redis[("Redis")]
+    LocationService <-->|"Cache lokasi"| Redis
+    ItemRepository <-->|"Item dan kategori"| PostgreSQL[("PostgreSQL")]
+    LocationRepository <-->|"Lokasi"| PostgreSQL
+    StockRepository <-->|"Saldo, audit, idempotensi"| PostgreSQL
 ```
 
 - `backend/cmd`: entrypoint API, migration, dan seed.
@@ -104,20 +113,38 @@ flowchart LR
 
 Tidak ada shared package kosong. Backend memiliki `package.json` hanya untuk integrasi task Turbo; proses runtime tetap Go. Build Go memakai `CGO_ENABLED=0` dalam container dan berjalan sebagai user non-root. Frontend memakai Nginx non-root dan fallback SPA untuk deep link.
 
+### Model, handler, service, dan repository per fitur
+
+Setiap fitur memiliki model data, handler HTTP, service untuk aturan bisnis, dan repository untuk akses PostgreSQL:
+
+| Model                                           | Handler           | Service           | Repository           | Tanggung jawab                      |
+| ----------------------------------------------- | ----------------- | ----------------- | -------------------- | ----------------------------------- |
+| `Item`, `ItemInput`, `Filter`                   | `ItemHandler`     | `ItemService`     | `ItemRepository`     | CRUD item dan kategori              |
+| `Location`, `LocationInput`                     | `LocationHandler` | `LocationService` | `LocationRepository` | Daftar/tambah/edit lokasi           |
+| `Stock`, `StockSummary`, input dan hasil mutasi | `StockHandler`    | `StockService`    | `StockRepository`    | Saldo, receive, transfer, dan audit |
+
+File `items.go`, `locations.go`, dan `stock.go` tersedia di masing-masing folder `internal/model/`, `internal/httpapi/`, `internal/service/`, dan `internal/repository/`. Model item dan lokasi menyediakan fungsi normalisasi dan validasi metadata yang dipanggil service. Handler menangani decoding JSON, header, UUID pada path, dan parsing parameter query; service menjalankan normalisasi dan validasi bisnis satu kali sebelum mengakses repository. Batas pagination/filter serta aturan kuantitas dan key idempotensi juga berada di service. Constraint database tetap menjaga integritas saat transaksi berjalan. Error domain berada di `internal/model/errors.go`, sedangkan parsing dan format kuantitas eksak berada di `internal/model/quantity.go`.
+
+`cmd/api/main.go` membuat ketiga repository menggunakan pool koneksi yang sama, memasangkan setiap repository ke service yang sesuai, lalu memasangkan setiap service ke handler fitur tersebut. Interface repository didefinisikan pada service yang menggunakannya.
+
+Helper cache di `internal/service/cache.go` digunakan oleh service item dan lokasi. Helper error PostgreSQL dan rollback transaksi berada di `internal/repository/postgres.go`. `StockRepository` melakukan pemeriksaan item/lokasi yang diperlukan dalam transaksi stok, sehingga perubahan saldo, audit, dan idempotensi tetap di-commit bersama.
+
+Route tetap terpusat di `internal/httpapi/http.go`, bersama middleware, decoding request, dan envelope response. Struct `API` merangkai ketiga handler. Contoh alur daftar item: `GET /api/v1/items` → `ItemHandler.List()` → `ItemService.List()` → `ItemRepository.List()`. Data hasil query menggunakan `model.Item`.
+
 ### Alur pembacaan lokasi dan kategori
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Browser
-    participant API as HTTP handler
-    participant Service
+    participant API as LocationHandler / ItemHandler
+    participant Service as LocationService / ItemService
     participant Redis
-    participant Repo as Repository
+    participant Repo as LocationRepository / ItemRepository
     participant DB as PostgreSQL
 
     Browser->>API: GET /api/v1/locations atau /api/v1/categories
-    API->>Service: Locations() atau Categories()
+    API->>Service: LocationService.List() atau ItemService.Categories()
     opt Cache diaktifkan
         Service->>Redis: Baca lookup dan revision
         Redis-->>Service: Data cache, miss, atau error
@@ -144,9 +171,9 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant Browser
-    participant API as HTTP handler
-    participant Service
-    participant Repo as Repository
+    participant API as StockHandler
+    participant Service as StockService
+    participant Repo as StockRepository
     participant DB as PostgreSQL
 
     Browser->>API: POST /api/v1/stock/transfer
@@ -189,6 +216,8 @@ Backend dan frontend mengerjakan satu alur bisnis yang saling terkait. Contohnya
 
 Kontrak OpenAPI juga berada dekat dengan kedua aplikasi. Setelah kontrak berubah, tipe frontend dapat di-generate dan diverifikasi dalam checkout yang sama. Ini mengurangi koordinasi versi kontrak antar-repository. Kesesuaian implementasi tetap diperiksa melalui typecheck, contract test, dan E2E.
 
+Monorepo juga sangat mendukung workflow coding dengan bantuan AI karena konteks frontend dan backend tersedia dalam satu workspace. AI dapat menelusuri hubungan antara kontrak OpenAPI, implementasi Go, tipe TypeScript, penggunaan API di UI, dan test tanpa berpindah repository atau mengandalkan salinan konteks manual. Perubahan lintas aplikasi lebih mudah dikerjakan dan ditinjau bersama, sehingga konsistensi nama field, format payload, validasi, dan penanganan error lebih mudah dijaga. Konsistensi hasilnya tetap diverifikasi melalui lint, typecheck, serta unit, integration, dan E2E test.
+
 Untuk pengembangan dan evaluasi technical test, satu checkout menyediakan README, konfigurasi environment, Docker Compose, dan CI yang sama. Backend dan frontend tetap memiliki dependency, build, serta container masing-masing; dependency Go dikelola melalui Go modules, sedangkan dependency JavaScript melalui npm workspaces.
 
 Trade-off-nya adalah cakupan repository dan CI menjadi lebih luas. Konfigurasi bersama dapat memicu pemeriksaan kedua aplikasi, dan pengaturan akses source code berlaku pada repository yang sama. Pilihan ini sesuai dengan proyek yang frontend dan backend-nya berkembang bersama serta dikelola oleh tim yang sama.
@@ -202,67 +231,6 @@ Turborepo juga menyediakan cache lokal untuk task deterministik. Hasil build, li
 Task yang bergantung pada proses atau layanan aktif tetap dijalankan: `dev` dan integration test tidak dicache. Migration serta E2E dijalankan langsung melalui script masing-masing. Konfigurasi ini menjaga agar hasil cache tidak menggantikan pemeriksaan terhadap kondisi database, Redis, atau browser yang sebenarnya.
 
 Trade-off-nya adalah tambahan dependency Turborepo dan konfigurasi cache yang perlu dirawat. Workflow dari root membutuhkan Node/npm, termasuk saat mengoordinasikan task Go. Untuk dua aplikasi, manfaat utamanya adalah perintah kerja yang konsisten dan pengulangan task lokal yang lebih cepat. Remote cache belum dikonfigurasi, sehingga reuse cache Turborepo antar-run CI belum tersedia.
-
-## Kontrak dan aturan bisnis
-
-| Method             | Endpoint                 | Fungsi                              |
-| ------------------ | ------------------------ | ----------------------------------- |
-| POST / GET         | `/api/v1/items`          | Tambah / list item aktif            |
-| GET / PUT / DELETE | `/api/v1/items/:id`      | Detail / update penuh / soft delete |
-| POST               | `/api/v1/stock/receive`  | Penerimaan stok ke satu lokasi      |
-| GET                | `/api/v1/stock/:item_id` | Saldo per lokasi dan total          |
-| GET / POST         | `/api/v1/locations`      | Daftar / tambah lokasi              |
-| PUT                | `/api/v1/locations/:id`  | Edit metadata lokasi                |
-| POST               | `/api/v1/stock/transfer` | Transfer stok antar lokasi          |
-| GET                | `/api/v1/categories`     | Kategori unik seluruh item aktif    |
-
-Envelope sukses berisi `success`, `message`, `data`; list item menambahkan `meta: { page, limit, total }`. Error berisi `success: false`, `message`, dan `errors: [{ field, reason }]`. Status utama: 400 input invalid, 404 resource tidak tersedia, 409 konflik, 500 kegagalan internal, dan 503 service unavailable/timeout. Detail database tidak dikirim ke client.
-
-- SKU di-trim dan di-uppercase; unik juga terhadap item terhapus. Tidak ada reuse SKU atau restore.
-- `search` mencocokkan substring nama/SKU secara case-insensitive. `%` dan `_` adalah karakter literal. `category` adalah exact match.
-- Pagination default `page=1&limit=10`, limit maksimum 100 dan page maksimum 1.000.000. Urutan `created_at DESC, id DESC`; count dan hasil list berasal dari snapshot transaksi yang sama.
-- Soft delete selalu diperbolehkan, termasuk item dengan stok. Stok dan riwayat tetap tersimpan, tetapi GET/update/delete/receive/transfer berikutnya untuk item tersebut menghasilkan 404.
-- Kategori/unit merupakan metadata bebas. Mengubah unit **tidak mengonversi saldo**; UI menjelaskan hal ini pada form edit.
-- Qty adalah **string desimal**, maksimal 15 digit bilangan bulat dan 3 digit pecahan. Gunakan titik, misalnya `"1.250"`; JSON number, notasi eksponen, nilai negatif, nol untuk receipt/transfer, serta presisi berlebih ditolak.
-- Saldo per lokasi memakai `NUMERIC(18,3)`; total merupakan penjumlahan eksak dan bisa lebih besar dari batas satu lokasi. Backend memakai thousandths berbasis integer untuk validasi/normalisasi, frontend tidak memakai Number untuk kuantitas.
-- Kode lokasi di-trim dan di-uppercase, unik tanpa membedakan kapital. Zone dan type wajib. Edit lokasi mempertahankan ID, saldo, serta riwayat yang mereferensikannya. Seed tidak menimpa perubahan metadata. Penghapusan lokasi belum disediakan.
-- Timestamp dikirim UTC; UI menampilkan tanggal dalam zona waktu browser.
-
-### Transaksi dan retry
-
-Penerimaan mengunci baris item aktif, memverifikasi lokasi, melakukan atomic upsert saldo, menulis `stock_movements`, lalu menyimpan hasil idempotensi dalam **satu transaksi**. Soft delete memakai row lock yang sama. Jika penerimaan menang lebih dulu, stoknya tersimpan lalu item boleh dihapus; jika delete menang lebih dulu, receive ditolak. Error menyebabkan rollback.
-
-Transfer memakai penguncian item yang sama dengan receive dan delete. Lokasi asal dan tujuan harus berbeda; jumlah harus positif dan tidak melebihi saldo asal. Debit, kredit, audit `stock_movements` (`kind=transfer`, `from_location_id`, `location_id` sebagai tujuan), dan hasil idempotensi di-commit bersama. Total item tidak berubah. Saldo kurang atau overflow di tujuan menghasilkan 409 dan rollback penuh; lokasi/item tidak ditemukan menghasilkan 404. Migration `000002` menambahkan fitur ini tanpa menghapus data lama; rollback migration tersebut ditolak bila riwayat transfer sudah ada.
-
-`Idempotency-Key` opsional untuk API dan selalu dikirim UI. Advisory transaction lock menserialisasi penggunaan key, termasuk saat key belum tersimpan. Payload dikanonisasi sebelum di-hash. Key dan payload yang sama mengembalikan hasil operasi asli; payload atau jenis operasi berbeda menghasilkan 409. Namespace key dibagi antara receive dan transfer. Replay yang sudah berhasil tetap dapat dikembalikan setelah item dihapus karena tidak membuat mutasi baru. Key tidak kedaluwarsa dalam versi ini; retensi perlu dirancang sebelum penggunaan berskala besar.
-
-UI tidak melakukan retry mutation otomatis. Setelah network error/5xx, retry dengan payload sama memakai key yang sama. Mengubah payload memulai operasi baru. Jangan reload halaman selama hasil receipt/transfer belum jelas: key retry hanya disimpan selama komponen masih aktif, bukan lintas reload/browser. Integrasi eksternal harus menyimpan key sampai hasil diketahui.
-
-Contoh penerimaan:
-
-```sh
-curl http://localhost:8088/api/v1/stock/receive \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: delivery-2026-001' \
-  -d '{"item_id":"<item-uuid>","location_id":"10000000-0000-4000-8000-000000000001","qty":"1.250"}'
-```
-
-### Pencarian dan filter kategori
-
-Inventory dan Locations memakai komponen input pencarian yang sama, termasuk tinggi, warna, ikon, focus state, dan tombol clear. Pencarian item tetap memakai debounce 350 ms; pencarian lokasi menyaring daftar yang sudah dimuat.
-
-Filter kategori berupa dropdown dengan pencarian tanpa membedakan kapital, daftar yang dapat di-scroll, serta dukungan keyboard: panah untuk navigasi, Enter untuk memilih, dan Escape untuk menutup. Pemilihan kategori mereset pagination dan disimpan di URL. Kategori terpilih tetap terlihat saat menu dibuka kembali; **All categories** menghapus filter. Menu merender maksimal 100 kategori yang cocok sekaligus agar tetap ringan, dengan petunjuk untuk mempersempit pencarian jika hasil lebih banyak. Pencarian tetap mencakup seluruh kategori aktif dari API.
-
-### Menggunakan Locations dan transfer
-
-Buka **Locations** di sidebar untuk mencari kode/zone/type, menambah lokasi, atau mengedit metadata. Untuk memindahkan stok, buka detail item lalu tekan ikon **Transfer stock** (panah dua arah) di panel stok. Pilih asal dan tujuan, lihat saldo asal, lalu isi jumlah. Saldo yang ditampilkan merupakan snapshot; server memeriksa kembali saldo terbaru saat transaksi berjalan.
-
-```sh
-curl http://localhost:8088/api/v1/stock/transfer \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: transfer-2026-001' \
-  -d '{"item_id":"<item-uuid>","from_location_id":"10000000-0000-4000-8000-000000000001","to_location_id":"10000000-0000-4000-8000-000000000002","qty":"0.100"}'
-```
 
 ## Redis
 
@@ -307,7 +275,7 @@ npm run test:integration
 
 Integration test membuat schema UUID terisolasi, menggunakan SQL migration sebenarnya, dan membersihkannya sesudah test. Tidak boleh menunjuk database produksi. Suite mencakup SKU duplikat, search literal/filter/pagination, soft delete dan retensi audit, receipt bersamaan, idempotensi, overflow/rollback, receive versus delete, transfer bersamaan tanpa saldo negatif, retry transfer, rollback debit/kredit/audit, transfer versus delete, serta edit lokasi dan keunikan kode. Test Redis memakai prefix UUID terisolasi tanpa `FLUSHDB`, mencakup hit/miss, TTL, revision, invalidasi, dan fallback. Test Go dijalankan dengan `-race`; lint menjalankan `go vet` dan golangci-lint.
 
-Frontend: Vitest + Testing Library + MSW menguji debounce/fokus, validasi form, error API, state submit, dan key receipt/transfer saat retry. Playwright menggunakan aplikasi dan PostgreSQL asli pada viewport desktop dan tablet, termasuk audit axe serta navigasi keyboard.
+Frontend: Vitest + Testing Library + MSW menguji debounce/fokus, validasi form, error API, state submit, pemulihan key/payload receipt dan transfer setelah remount, storage gagal/rusak, serta konfigurasi proxy dari `.env.local`. Schema quantity dipakai bersama oleh form receive dan transfer. Playwright menggunakan aplikasi dan PostgreSQL asli pada viewport desktop dan tablet, termasuk audit axe, navigasi keyboard, serta skenario commit berhasil tetapi respons diputus lalu halaman di-reload sebelum retry.
 
 ```sh
 docker compose up --build -d --wait
@@ -327,6 +295,7 @@ GitHub Actions menjalankan quality gates dan suite container/browser pada push/P
 
 - Log JSON API mencatat request ID, method/path, status, durasi, serta receipt/transfer berhasil setelah commit. `X-Request-ID` dikembalikan ke client; body request dan credential tidak dicatat.
 - `/health/live` memeriksa proses, `/health/ready` memeriksa koneksi database. Compose menahan startup API bila migration/seed gagal.
+- Request ID dibuat oleh middleware dan dibawa melalui context/logger ke log error, cache, serta transaksi stok setelah commit. Respons timeout tetap memakai envelope JSON dan `Content-Type: application/json`.
 - Koneksi awal database dicoba ulang maksimal 30 detik; Nginx me-resolve ulang DNS Docker setelah restart. Request timeout 15 detik, batas JSON 1 MiB, HTTP header/read/write timeout, dan graceful shutdown 10 detik.
 - Swagger UI menggunakan asset CDN yang dipin; endpoint OpenAPI tetap tersedia tanpa akses internet.
 - Belum ada autentikasi, authorization, TLS publik, rate limiting, retensi audit otomatis, atau sistem alert. Target versi ini lokal/internal sesuai cakupan test; penggunaan publik memerlukan pengamanan akses dan konfigurasi operasional tambahan.
@@ -349,7 +318,7 @@ Simpan backup di lokasi aman di luar repository. Untuk production, jadwalkan bac
 
 ## Deklarasi penggunaan AI
 
-Sekitar **90% kode proyek ini ditulis dengan bantuan AI** melalui OpenAI Codex, menggunakan model **GPT 6.1 Sol** dan **GPT 6 Astra**. Bantuan AI mencakup perencanaan arsitektur, scaffolding, implementasi backend/frontend, kontrak OpenAPI, penulisan test, konfigurasi Docker/CI, dan dokumentasi.
+Sekitar **95% kode proyek ini ditulis dengan bantuan AI** melalui OpenAI Codex, menggunakan model **GPT 6.1 Sol** dan **GPT 6 Astra**. Bantuan AI mencakup perencanaan arsitektur, scaffolding, implementasi backend/frontend, kontrak OpenAPI, penulisan test, konfigurasi Docker/CI, dan dokumentasi.
 
 Validasi kode yang dihasilkan AI diperketat melalui **unit test, integration test, end-to-end (E2E) test, dan smoke test**. Pengujian mencakup aturan bisnis, integrasi dengan PostgreSQL dan Redis, alur pengguna di browser, serta perilaku aplikasi saat service direstart atau tidak tersedia.
 
@@ -360,8 +329,8 @@ Validasi kode yang dihasilkan AI diperketat melalui **unit test, integration tes
 Diverifikasi pada 26–27 Oktober 2026 di macOS ARM64 dengan PostgreSQL 18 melalui Docker:
 
 - Lint Go/TypeScript, typecheck, build, validasi OpenAPI, serta format check lulus.
-- Unit/integration test Go dengan race detector lulus, termasuk transaksi dan concurrency transfer.
-- **9 test frontend** dan **10 skenario Playwright** (desktop/tablet) lulus, termasuk audit axe, fokus keyboard, debounce, pagination setelah delete, receipt `0.100 + 0.200`, tambah/edit lokasi, dan transfer eksak tanpa perubahan total stok.
+- Unit/integration test Go dengan race detector lulus, termasuk transaksi dan concurrency transfer, korelasi request ID, envelope timeout JSON, serta timestamp UTC dan replay legacy saat diuji dengan `TZ=Asia/Jakarta`.
+- **17 test frontend** dan **14 skenario Playwright** (desktop/tablet) lulus, termasuk audit axe, fokus keyboard, debounce, pagination setelah delete, receipt `0.100 + 0.200`, tambah/edit lokasi, transfer eksak tanpa perubahan total stok, serta recovery receipt/transfer setelah respons commit hilang dan halaman di-reload.
 - Startup Compose, persistensi setelah restart database/API, dan failure migration lulus.
 - Redis: cache hit/miss, TTL, revision yang menolak stale fill, invalidasi, serta fallback saat Redis tidak tersedia diuji otomatis.
 - `govulncheck` pada dependency Go saat ini tidak menemukan kerentanan. Dua temuan moderate npm terkait React Router v6 dijelaskan di atas.

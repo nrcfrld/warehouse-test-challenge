@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/enrico/warehouse/internal/httpapi"
 	"log/slog"
 	"net/http/httptest"
 	"strings"
@@ -14,24 +13,22 @@ import (
 	"testing"
 
 	"github.com/enrico/warehouse/internal/model"
-	"github.com/enrico/warehouse/internal/repository"
-	"github.com/enrico/warehouse/internal/service"
 	"github.com/enrico/warehouse/migrations"
 	"github.com/google/uuid"
 )
 
-func transferFixture(t *testing.T) (*repository.Postgres, *service.Service, model.Item, model.Location) {
+func transferFixture(t *testing.T) (*testRepositories, testServices, model.Item, model.Location) {
 	t.Helper()
 	r := database(t)
-	svc := &service.Service{Store: r, Logger: slog.Default()}
+	svc := newTestServices(r, slog.Default())
 	x := item(t, r)
-	destination, err := svc.CreateLocation(context.Background(), model.LocationInput{Code: "B-01", Zone: "Other", Type: "Bin"})
+	destination, err := svc.Locations.Create(context.Background(), model.LocationInput{Code: "B-01", Zone: "Other", Type: "Bin"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r, svc, x, destination
 }
-func balanceAt(t *testing.T, r *repository.Postgres, itemID, location string) string {
+func balanceAt(t *testing.T, r *testRepositories, itemID, location string) string {
 	t.Helper()
 	var qty string
 	if err := r.Pool.QueryRow(context.Background(), "SELECT qty::text FROM stocks WHERE item_id=$1 AND location_id=$2", itemID, location).Scan(&qty); err != nil {
@@ -42,24 +39,24 @@ func balanceAt(t *testing.T, r *repository.Postgres, itemID, location string) st
 func TestLocationsCreateEditAndUniqueness(t *testing.T) {
 	r, svc, x, destination := transferFixture(t)
 	ctx := context.Background()
-	if _, err := svc.CreateLocation(ctx, model.LocationInput{Code: " b-01 ", Zone: "Other", Type: "Shelf"}); model.Public(err).Status != 409 {
+	if _, err := svc.Locations.Create(ctx, model.LocationInput{Code: " b-01 ", Zone: "Other", Type: "Shelf"}); model.Public(err).Status != 409 {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: destination.ID, Qty: "1"}, ""); err != nil {
+	if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: destination.ID, Qty: "1"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := svc.UpdateLocation(ctx, destination.ID, model.LocationInput{Code: " c-02 ", Zone: " New zone ", Type: "Rack"})
+	updated, err := svc.Locations.Update(ctx, destination.ID, model.LocationInput{Code: " c-02 ", Zone: " New zone ", Type: "Rack"})
 	if err != nil || updated.Code != "C-02" || updated.ID != destination.ID {
 		t.Fatal(updated, err)
 	}
-	stock, err := svc.Stock(ctx, x.ID)
+	stock, err := svc.Stock.Get(ctx, x.ID)
 	if err != nil || stock.Total != "1.000" || stock.Locations[0].Location.Zone != "New zone" {
 		t.Fatal(stock, err)
 	}
-	if _, err = svc.UpdateLocation(ctx, destination.ID, model.LocationInput{Code: " a-01 ", Zone: "Main", Type: "Rack"}); model.Public(err).Status != 409 {
+	if _, err = svc.Locations.Update(ctx, destination.ID, model.LocationInput{Code: " a-01 ", Zone: "Main", Type: "Rack"}); model.Public(err).Status != 409 {
 		t.Fatal(err)
 	}
-	if _, err = svc.UpdateLocation(ctx, uuid.NewString(), model.LocationInput{Code: "C", Zone: "Main", Type: "Rack"}); model.Public(err).Status != 404 {
+	if _, err = svc.Locations.Update(ctx, uuid.NewString(), model.LocationInput{Code: "C", Zone: "Main", Type: "Rack"}); model.Public(err).Status != 404 {
 		t.Fatal(err)
 	}
 	if balanceAt(t, r, x.ID, destination.ID) != "1.000" {
@@ -70,42 +67,42 @@ func TestTransferExactIdempotencyAndRetention(t *testing.T) {
 	r, svc, x, destination := transferFixture(t)
 	ctx := context.Background()
 	for _, qty := range []string{"0.100", "0.200"} {
-		if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: qty}, ""); err != nil {
+		if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: qty}, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
 	in := model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.1"}
-	first, replay, err := svc.Transfer(ctx, in, "move")
+	first, replay, err := svc.Stock.Transfer(ctx, in, "move")
 	if err != nil || replay || first.SourceBalance != "0.200" || first.DestinationBalance != "0.100" {
 		t.Fatal(first, replay, err)
 	}
 	in.Qty = "0.100"
-	again, replay, err := svc.Transfer(ctx, in, "move")
+	again, replay, err := svc.Stock.Transfer(ctx, in, "move")
 	if err != nil || !replay || again.ID != first.ID {
 		t.Fatal(again, replay, err)
 	}
 	in.Qty = "0.2"
-	if _, _, err = svc.Transfer(ctx, in, "move"); model.Public(err).Status != 409 {
+	if _, _, err = svc.Stock.Transfer(ctx, in, "move"); model.Public(err).Status != 409 {
 		t.Fatal(err)
 	}
-	if _, _, err = svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, "move"); model.Public(err).Status != 409 {
+	if _, _, err = svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, "move"); model.Public(err).Status != 409 {
 		t.Fatal("cross-operation key accepted", err)
 	}
 	in.Qty = "0.201"
-	if _, _, err = svc.Transfer(ctx, in, "insufficient"); model.Public(err).Status != 409 {
+	if _, _, err = svc.Stock.Transfer(ctx, in, "insufficient"); model.Public(err).Status != 409 {
 		t.Fatal(err)
 	}
 	if balanceAt(t, r, x.ID, locationID) != "0.200" || balanceAt(t, r, x.ID, destination.ID) != "0.100" {
 		t.Fatal("failed transfer mutated balances")
 	}
-	if err = svc.Delete(ctx, x.ID); err != nil {
+	if err = svc.Items.Delete(ctx, x.ID); err != nil {
 		t.Fatal(err)
 	}
 	in.Qty = "0.100"
-	if _, _, err = svc.Transfer(ctx, in, "new"); model.Public(err).Status != 404 {
+	if _, _, err = svc.Stock.Transfer(ctx, in, "new"); model.Public(err).Status != 404 {
 		t.Fatal(err)
 	}
-	if _, replay, err = svc.Transfer(ctx, in, "move"); err != nil || !replay {
+	if _, replay, err = svc.Stock.Transfer(ctx, in, "move"); err != nil || !replay {
 		t.Fatal("replay after delete", err)
 	}
 	var count int
@@ -125,7 +122,7 @@ func TestConcurrentTransferNoOverdraftOrDuplicate(t *testing.T) {
 		t.Run(fmt.Sprint(sameKey), func(t *testing.T) {
 			r, svc, x, destination := transferFixture(t)
 			ctx := context.Background()
-			if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
+			if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
 				t.Fatal(err)
 			}
 			var wg sync.WaitGroup
@@ -136,7 +133,7 @@ func TestConcurrentTransferNoOverdraftOrDuplicate(t *testing.T) {
 					if !sameKey {
 						key = fmt.Sprintf("key-%d", i)
 					}
-					_, _, err := svc.Transfer(ctx, model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.100"}, key)
+					_, _, err := svc.Stock.Transfer(ctx, model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.100"}, key)
 					results <- err
 				})
 			}
@@ -165,12 +162,12 @@ func TestTransferRollback(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			r, svc, x, destination := transferFixture(t)
 			ctx := context.Background()
-			if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
+			if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
 				t.Fatal(err)
 			}
 			switch failure {
 			case "overflow":
-				if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: destination.ID, Qty: "999999999999999.999"}, ""); err != nil {
+				if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: destination.ID, Qty: "999999999999999.999"}, ""); err != nil {
 					t.Fatal(err)
 				}
 			case "audit":
@@ -180,7 +177,7 @@ func TestTransferRollback(t *testing.T) {
 			case "missing destination":
 				destination.ID = uuid.NewString()
 			}
-			if _, _, err := svc.Transfer(ctx, model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.100"}, "failed"); err == nil {
+			if _, _, err := svc.Stock.Transfer(ctx, model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.100"}, "failed"); err == nil {
 				t.Fatal("expected failure")
 			}
 			if balanceAt(t, r, x.ID, locationID) != "1.000" {
@@ -205,15 +202,15 @@ func TestTransferVersusDelete(t *testing.T) {
 	for range 8 {
 		r, svc, x, destination := transferFixture(t)
 		ctx := context.Background()
-		if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
+		if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
 			t.Fatal(err)
 		}
 		var wg sync.WaitGroup
 		var transferErr, deleteErr error
 		wg.Go(func() {
-			_, _, transferErr = svc.Transfer(ctx, model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.100"}, "move")
+			_, _, transferErr = svc.Stock.Transfer(ctx, model.TransferInput{ItemID: x.ID, FromLocationID: locationID, ToLocationID: destination.ID, Qty: "0.100"}, "move")
 		})
-		wg.Go(func() { deleteErr = svc.Delete(ctx, x.ID) })
+		wg.Go(func() { deleteErr = svc.Items.Delete(ctx, x.ID) })
 		wg.Wait()
 		if deleteErr != nil {
 			t.Fatal(deleteErr)
@@ -233,9 +230,9 @@ func TestTransferVersusDelete(t *testing.T) {
 
 func TestLocationAndTransferHTTPContract(t *testing.T) {
 	r, svc, x, destination := transferFixture(t)
-	handler := (&httpapi.API{Service: svc, Logger: slog.Default(), Ping: r.Pool.Ping}).Handler()
+	handler := svc.API(r, slog.Default()).Handler()
 	ctx := context.Background()
-	if _, _, err := svc.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
+	if _, _, err := svc.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	send := func(method, path, body, key string) *httptest.ResponseRecorder {

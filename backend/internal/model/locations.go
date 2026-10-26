@@ -3,8 +3,15 @@ package model
 import (
 	"fmt"
 	"strings"
-	"time"
 )
+
+// Location identifies a storage position.
+type Location struct {
+	ID   string `json:"id"`
+	Code string `json:"code"`
+	Zone string `json:"zone"`
+	Type string `json:"type"`
+}
 
 // LocationInput describes editable storage metadata.
 type LocationInput struct {
@@ -35,24 +42,4 @@ func ValidateLocation(in LocationInput) error {
 		return &Error{Status: 400, Message: "Validation failed", Fields: issues}
 	}
 	return nil
-}
-
-// TransferInput moves an exact quantity between distinct locations.
-type TransferInput struct {
-	ItemID         string `json:"item_id"`
-	FromLocationID string `json:"from_location_id"`
-	ToLocationID   string `json:"to_location_id"`
-	Qty            string `json:"qty"`
-}
-
-// Transfer is the committed movement and balances at the time of transfer.
-type Transfer struct {
-	ID                 string    `json:"id"`
-	ItemID             string    `json:"item_id"`
-	FromLocationID     string    `json:"from_location_id"`
-	ToLocationID       string    `json:"to_location_id"`
-	Qty                string    `json:"qty"`
-	SourceBalance      string    `json:"source_balance"`
-	DestinationBalance string    `json:"destination_balance"`
-	CreatedAt          time.Time `json:"created_at"`
 }

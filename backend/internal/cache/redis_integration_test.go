@@ -121,13 +121,13 @@ func TestRedisExpiry(t *testing.T) {
 }
 
 type lookupStore struct {
-	service.Store
+	service.LocationRepository
 	locations []model.Location
 	loads     int
 	err       error
 }
 
-func (s *lookupStore) Locations(context.Context) ([]model.Location, error) {
+func (s *lookupStore) List(context.Context) ([]model.Location, error) {
 	s.loads++
 	return s.locations, s.err
 }
@@ -135,9 +135,9 @@ func TestServiceWithRealRedis(t *testing.T) {
 	c := redisFixture(t, time.Minute)
 	ctx := context.Background()
 	store := &lookupStore{locations: []model.Location{{ID: "id", Code: "A-01", Zone: "Main", Type: "Shelf"}}}
-	svc := &service.Service{Store: store, Cache: c}
+	svc := &service.LocationService{Repository: store, Cache: c}
 	for range 2 {
-		out, err := svc.Locations(ctx)
+		out, err := svc.List(ctx)
 		if err != nil || len(out) != 1 || out[0].Code != "A-01" {
 			t.Fatal(out, err)
 		}
@@ -149,7 +149,7 @@ func TestServiceWithRealRedis(t *testing.T) {
 	if err := c.Invalidate(ctx, "locations"); err != nil {
 		t.Fatal(err)
 	}
-	out, err := svc.Locations(ctx)
+	out, err := svc.List(ctx)
 	if err != nil || out[0].Code != "B-01" || store.loads != 2 {
 		t.Fatal(out, store.loads, err)
 	}
@@ -157,7 +157,7 @@ func TestServiceWithRealRedis(t *testing.T) {
 	if err = c.client.HSet(ctx, c.prefix+"locations", "value", "broken JSON").Err(); err != nil {
 		t.Fatal(err)
 	}
-	out, err = svc.Locations(ctx)
+	out, err = svc.List(ctx)
 	if err != nil || out[0].Code != "B-01" || store.loads != 3 {
 		t.Fatal(out, store.loads, err)
 	}
@@ -173,12 +173,12 @@ func TestServiceWithRealRedis(t *testing.T) {
 	}()
 	svc.Cache = unavailable
 	start := time.Now()
-	out, err = svc.Locations(ctx)
+	out, err = svc.List(ctx)
 	if err != nil || out[0].Code != "B-01" || time.Since(start) > time.Second {
 		t.Fatal("fallback failed or exceeded its bound", out, err)
 	}
 	store.err = errors.New("database failed")
-	if _, err = svc.Locations(ctx); !errors.Is(err, store.err) {
+	if _, err = svc.List(ctx); !errors.Is(err, store.err) {
 		t.Fatal("cache hid a database error", err)
 	}
 }

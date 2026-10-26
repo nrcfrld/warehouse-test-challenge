@@ -24,7 +24,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func database(t *testing.T) *repository.Postgres {
+type testRepositories struct {
+	Pool      *pgxpool.Pool
+	Items     *repository.ItemRepository
+	Locations *repository.LocationRepository
+	Stock     *repository.StockRepository
+}
+
+func database(t *testing.T) *testRepositories {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -73,14 +80,36 @@ func database(t *testing.T) *repository.Postgres {
 	if _, err = pool.Exec(ctx, "INSERT INTO locations(id,code,zone,type) VALUES($1,'A-01','Main','Shelf')", locationID); err != nil {
 		t.Fatal(err)
 	}
-	return &repository.Postgres{Pool: pool}
+	return &testRepositories{
+		Pool:      pool,
+		Items:     &repository.ItemRepository{Pool: pool},
+		Locations: &repository.LocationRepository{Pool: pool},
+		Stock:     &repository.StockRepository{Pool: pool},
+	}
+}
+
+type testServices struct {
+	Items     *service.ItemService
+	Locations *service.LocationService
+	Stock     *service.StockService
+}
+
+func newTestServices(r *testRepositories, logger *slog.Logger) testServices {
+	return testServices{
+		Items:     &service.ItemService{Repository: r.Items, Logger: logger},
+		Locations: &service.LocationService{Repository: r.Locations, Logger: logger},
+		Stock:     &service.StockService{Repository: r.Stock, Logger: logger},
+	}
+}
+func (s testServices) API(r *testRepositories, logger *slog.Logger) *httpapi.API {
+	return &httpapi.API{Items: &httpapi.ItemHandler{Service: s.Items}, Locations: &httpapi.LocationHandler{Service: s.Locations}, Stock: &httpapi.StockHandler{Service: s.Stock}, Logger: logger, Ping: r.Pool.Ping}
 }
 
 const locationID = "10000000-0000-4000-8000-000000000001"
 
-func item(t *testing.T, r *repository.Postgres) model.Item {
+func item(t *testing.T, r *testRepositories) model.Item {
 	t.Helper()
-	x, err := r.Create(context.Background(), model.ItemInput{SKU: strings.ToUpper(uuid.NewString()), Name: "Cotton", Category: "Materials", Unit: "kg"})
+	x, err := r.Items.Create(context.Background(), model.ItemInput{SKU: strings.ToUpper(uuid.NewString()), Name: "Cotton", Category: "Materials", Unit: "kg"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,41 +119,41 @@ func TestCRUDAndRetention(t *testing.T) {
 	ctx := context.Background()
 	r := database(t)
 	x := item(t, r)
-	if _, err := r.Create(ctx, model.ItemInput{SKU: x.SKU, Name: "Duplicate", Category: "Other", Unit: "kg"}); model.Public(err).Status != 409 {
+	if _, err := r.Items.Create(ctx, model.ItemInput{SKU: x.SKU, Name: "Duplicate", Category: "Other", Unit: "kg"}); model.Public(err).Status != 409 {
 		t.Fatalf("duplicate: %v", err)
 	}
-	items, total, err := r.List(ctx, model.Filter{Search: "cott", Category: "Materials", Page: 1, Limit: 1})
+	items, total, err := r.Items.List(ctx, model.Filter{Search: "cott", Category: "Materials", Page: 1, Limit: 1})
 	if err != nil || len(items) != 1 || total != 1 {
 		t.Fatalf("list %v %d %v", items, total, err)
 	}
-	items, total, err = r.List(ctx, model.Filter{Page: 2, Limit: 1})
+	items, total, err = r.Items.List(ctx, model.Filter{Page: 2, Limit: 1})
 	if err != nil || len(items) != 0 || total != 1 {
 		t.Fatal("empty page lost total", err)
 	}
-	items, _, err = r.List(ctx, model.Filter{Search: "%", Page: 1, Limit: 10})
+	items, _, err = r.Items.List(ctx, model.Filter{Search: "%", Page: 1, Limit: 10})
 	if err != nil || len(items) != 0 {
 		t.Fatal("search must treat wildcard literally", err)
 	}
-	categories, err := r.Categories(ctx)
+	categories, err := r.Items.Categories(ctx)
 	if err != nil || len(categories) != 1 {
 		t.Fatal(categories, err)
 	}
-	if _, _, err = r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.250"}, "receipt"); err != nil {
+	if _, _, err = r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.250"}, "receipt"); err != nil {
 		t.Fatal(err)
 	}
-	if err = r.Delete(ctx, x.ID); err != nil {
+	if err = r.Items.Delete(ctx, x.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.Get(ctx, x.ID); model.Public(err).Status != 404 {
+	if _, err = r.Items.Get(ctx, x.ID); model.Public(err).Status != 404 {
 		t.Fatal("deleted item visible")
 	}
-	if _, err = r.Stock(ctx, x.ID); model.Public(err).Status != 404 {
+	if _, err = r.Stock.Get(ctx, x.ID); model.Public(err).Status != 404 {
 		t.Fatal("deleted stock visible")
 	}
-	if _, _, err = r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.000"}, "new"); model.Public(err).Status != 404 {
+	if _, _, err = r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.000"}, "new"); model.Public(err).Status != 404 {
 		t.Fatal("deleted item received stock", err)
 	}
-	if _, err = r.Create(ctx, model.ItemInput{SKU: x.SKU, Name: "Reused", Category: "Materials", Unit: "kg"}); model.Public(err).Status != 409 {
+	if _, err = r.Items.Create(ctx, model.ItemInput{SKU: x.SKU, Name: "Reused", Category: "Materials", Unit: "kg"}); model.Public(err).Status != 409 {
 		t.Fatal("deleted SKU reused", err)
 	}
 	var count int
@@ -145,12 +174,12 @@ func TestConcurrentReceiptsAndReplay(t *testing.T) {
 	errs := make(chan error, 30)
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, _, err := r.Receive(ctx, in, uuid.NewString()); errs <- err }()
+		go func() { defer wg.Done(); _, _, err := r.Stock.Receive(ctx, in, uuid.NewString()); errs <- err }()
 	}
 	wg.Wait()
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, _, err := r.Receive(ctx, in, "same-key"); errs <- err }()
+		go func() { defer wg.Done(); _, _, err := r.Stock.Receive(ctx, in, "same-key"); errs <- err }()
 	}
 	wg.Wait()
 	close(errs)
@@ -159,20 +188,20 @@ func TestConcurrentReceiptsAndReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stock, err := r.Stock(ctx, x.ID)
+	stock, err := r.Stock.Get(ctx, x.ID)
 	if err != nil || stock.Total != "2.100" {
 		t.Fatalf("lost or duplicate update: %+v %v", stock, err)
 	}
-	original, replay, err := r.Receive(ctx, in, "same-key")
+	original, replay, err := r.Stock.Receive(ctx, in, "same-key")
 	if err != nil || !replay {
 		t.Fatal("missing replay", err)
 	}
-	again, _, err := r.Receive(ctx, in, "same-key")
+	again, _, err := r.Stock.Receive(ctx, in, "same-key")
 	if err != nil || original.ID != again.ID || original.Balance != again.Balance {
 		t.Fatal("replay changed", err)
 	}
 	in.Qty = "0.200"
-	if _, _, err = r.Receive(ctx, in, "same-key"); model.Public(err).Status != 409 {
+	if _, _, err = r.Stock.Receive(ctx, in, "same-key"); model.Public(err).Status != 409 {
 		t.Fatal("key mismatch allowed", err)
 	}
 	var count int
@@ -184,13 +213,13 @@ func TestRollbackAndOverflow(t *testing.T) {
 	ctx := context.Background()
 	r := database(t)
 	x := item(t, r)
-	if _, _, err := r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: uuid.NewString(), Qty: "1.000"}, "retry"); model.Public(err).Status != 404 {
+	if _, _, err := r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: uuid.NewString(), Qty: "1.000"}, "retry"); model.Public(err).Status != 404 {
 		t.Fatal(err)
 	}
-	if _, _, err := r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "999999999999999.999"}, "retry"); err != nil {
+	if _, _, err := r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "999999999999999.999"}, "retry"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "0.001"}, "overflow"); model.Public(err).Status != 409 {
+	if _, _, err := r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "0.001"}, "overflow"); model.Public(err).Status != 409 {
 		t.Fatal("overflow allowed", err)
 	}
 	var count int
@@ -209,17 +238,17 @@ func TestReceiveVersusDelete(t *testing.T) {
 	errs := make(chan error, 2)
 	go func() {
 		<-start
-		_, _, err := r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.000"}, "race")
+		_, _, err := r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.000"}, "race")
 		errs <- err
 	}()
-	go func() { <-start; errs <- r.Delete(ctx, x.ID) }()
+	go func() { <-start; errs <- r.Items.Delete(ctx, x.ID) }()
 	close(start)
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil && model.Public(err).Status != 404 {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.000"}, "after-delete"); model.Public(err).Status != 404 {
+	if _, _, err := r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "1.000"}, "after-delete"); model.Public(err).Status != 404 {
 		t.Fatal("receipt after delete", err)
 	}
 	var stockCount, movementCount int
@@ -230,8 +259,8 @@ func TestReceiveVersusDelete(t *testing.T) {
 func TestHTTPContract(t *testing.T) {
 	r := database(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := &service.Service{Store: r, Logger: logger}
-	api := &httpapi.API{Service: svc, Logger: logger, Ping: r.Pool.Ping}
+	svc := newTestServices(r, logger)
+	api := svc.API(r, logger)
 	handler := api.Handler()
 	for _, tt := range []struct {
 		method, path, body string
@@ -284,7 +313,7 @@ func TestAuditFailureRollsBackBalance(t *testing.T) {
 	if _, err := r.Pool.Exec(ctx, "ALTER TABLE stock_movements ADD CONSTRAINT test_reject CHECK (qty < 10)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "11.000"}, "audit-failure"); err == nil {
+	if _, _, err := r.Stock.Receive(ctx, model.ReceiveInput{ItemID: x.ID, LocationID: locationID, Qty: "11.000"}, "audit-failure"); err == nil {
 		t.Fatal("expected audit insert failure")
 	}
 	var balances, records, keys int
@@ -299,7 +328,7 @@ func TestAuditFailureRollsBackBalance(t *testing.T) {
 func TestHTTPWarehouseFlow(t *testing.T) {
 	r := database(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	api := &httpapi.API{Service: &service.Service{Store: r, Logger: logger}, Logger: logger, Ping: r.Pool.Ping}
+	api := newTestServices(r, logger).API(r, logger)
 	handler := api.Handler()
 	x := item(t, r)
 	for _, tt := range []struct {

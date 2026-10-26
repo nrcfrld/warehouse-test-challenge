@@ -8,21 +8,22 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/enrico/warehouse/docs"
 	"github.com/enrico/warehouse/internal/model"
-	"github.com/enrico/warehouse/internal/service"
+	"github.com/enrico/warehouse/internal/requestlog"
 	"github.com/google/uuid"
 )
 
-// API binds transport concerns to domain services.
+// API assembles domain handlers, shared middleware, and operational routes.
 type API struct {
-	Service *service.Service
-	Logger  *slog.Logger
-	Ping    func(context.Context) error
+	Items     *ItemHandler
+	Locations *LocationHandler
+	Stock     *StockHandler
+	Logger    *slog.Logger
+	Ping      func(context.Context) error
 }
 type endpoint func(http.ResponseWriter, *http.Request) error
 type envelope struct {
@@ -52,7 +53,7 @@ func (a *API) wrap(fn endpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r); err != nil {
 			if model.Public(err).Status >= 500 {
-				a.Logger.ErrorContext(r.Context(), "request.failed", "request_id", w.Header().Get("X-Request-ID"), "error", err)
+				requestlog.Logger(r.Context(), a.Logger).ErrorContext(r.Context(), "request.failed", "error", err)
 			}
 			failure(w, err)
 		}
@@ -84,30 +85,18 @@ func identifier(r *http.Request, name string) (string, error) {
 // Handler builds routes with request logging, recovery and bounded request duration.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/items", a.wrap(a.list))
-	mux.HandleFunc("POST /api/v1/items", a.wrap(a.create))
-	mux.HandleFunc("GET /api/v1/items/{id}", a.wrap(a.get))
-	mux.HandleFunc("PUT /api/v1/items/{id}", a.wrap(a.update))
-	mux.HandleFunc("DELETE /api/v1/items/{id}", a.wrap(a.remove))
-	mux.HandleFunc("GET /api/v1/stock/{item_id}", a.wrap(a.stock))
-	mux.HandleFunc("POST /api/v1/stock/receive", a.wrap(a.receive))
-	mux.HandleFunc("POST /api/v1/stock/transfer", a.wrap(a.transfer))
-	mux.HandleFunc("POST /api/v1/locations", a.wrap(a.createLocation))
-	mux.HandleFunc("PUT /api/v1/locations/{id}", a.wrap(a.updateLocation))
-	mux.HandleFunc("GET /api/v1/locations", a.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		x, e := a.Service.Locations(r.Context())
-		if e == nil {
-			respond(w, 200, "Locations retrieved successfully", x, nil)
-		}
-		return e
-	}))
-	mux.HandleFunc("GET /api/v1/categories", a.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		x, e := a.Service.Categories(r.Context())
-		if e == nil {
-			respond(w, 200, "Categories retrieved successfully", x, nil)
-		}
-		return e
-	}))
+	mux.HandleFunc("GET /api/v1/items", a.wrap(a.Items.List))
+	mux.HandleFunc("POST /api/v1/items", a.wrap(a.Items.Create))
+	mux.HandleFunc("GET /api/v1/items/{id}", a.wrap(a.Items.Get))
+	mux.HandleFunc("PUT /api/v1/items/{id}", a.wrap(a.Items.Update))
+	mux.HandleFunc("DELETE /api/v1/items/{id}", a.wrap(a.Items.Delete))
+	mux.HandleFunc("GET /api/v1/stock/{item_id}", a.wrap(a.Stock.Get))
+	mux.HandleFunc("POST /api/v1/stock/receive", a.wrap(a.Stock.Receive))
+	mux.HandleFunc("POST /api/v1/stock/transfer", a.wrap(a.Stock.Transfer))
+	mux.HandleFunc("POST /api/v1/locations", a.wrap(a.Locations.Create))
+	mux.HandleFunc("PUT /api/v1/locations/{id}", a.wrap(a.Locations.Update))
+	mux.HandleFunc("GET /api/v1/locations", a.wrap(a.Locations.List))
+	mux.HandleFunc("GET /api/v1/categories", a.wrap(a.Items.Categories))
 	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, "Service is alive", map[string]string{"status": "ok"}, nil)
 	})
@@ -131,131 +120,6 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/", a.wrap(func(w http.ResponseWriter, r *http.Request) error { return model.NotFound("Endpoint") }))
 	return a.middleware(http.TimeoutHandler(mux, 15*time.Second, `{"success":false,"message":"Request timed out","errors":[{"field":"request","reason":"Request timed out"}]}`))
 }
-func (a *API) list(w http.ResponseWriter, r *http.Request) error {
-	q := r.URL.Query()
-	f := model.Filter{Search: strings.TrimSpace(q.Get("search")), Category: strings.TrimSpace(q.Get("category")), Page: 1, Limit: 10}
-	for _, v := range []struct {
-		name   string
-		target *int
-		max    int
-	}{{"page", &f.Page, 1000000}, {"limit", &f.Limit, 100}} {
-		if q.Has(v.name) {
-			n, err := strconv.Atoi(q.Get(v.name))
-			if err != nil || n < 1 || n > v.max {
-				return model.Invalid(v.name, "Value is outside the supported range")
-			}
-			*v.target = n
-		}
-	}
-	if len([]rune(f.Search)) > 200 || len([]rune(f.Category)) > 100 {
-		return model.Invalid("filter", "Filter is too long")
-	}
-	items, total, err := a.Service.List(r.Context(), f)
-	if err != nil {
-		return err
-	}
-	respond(w, 200, "Items retrieved successfully", items, map[string]int{"page": f.Page, "limit": f.Limit, "total": total})
-	return nil
-}
-func (a *API) create(w http.ResponseWriter, r *http.Request) error {
-	var in model.ItemInput
-	if err := decode(w, r, &in); err != nil {
-		return err
-	}
-	in = model.NormalizeItem(in)
-	if err := model.ValidateItem(in); err != nil {
-		return err
-	}
-	x, err := a.Service.Create(r.Context(), in)
-	if err != nil {
-		return err
-	}
-	respond(w, 201, "Item created successfully", x, nil)
-	return nil
-}
-func (a *API) get(w http.ResponseWriter, r *http.Request) error {
-	id, err := identifier(r, "id")
-	if err != nil {
-		return err
-	}
-	x, err := a.Service.Get(r.Context(), id)
-	if err != nil {
-		return err
-	}
-	respond(w, 200, "Item retrieved successfully", x, nil)
-	return nil
-}
-func (a *API) update(w http.ResponseWriter, r *http.Request) error {
-	id, err := identifier(r, "id")
-	if err != nil {
-		return err
-	}
-	var in model.ItemInput
-	if err = decode(w, r, &in); err != nil {
-		return err
-	}
-	in = model.NormalizeItem(in)
-	if err = model.ValidateItem(in); err != nil {
-		return err
-	}
-	x, err := a.Service.Update(r.Context(), id, in)
-	if err != nil {
-		return err
-	}
-	respond(w, 200, "Item updated successfully", x, nil)
-	return nil
-}
-func (a *API) remove(w http.ResponseWriter, r *http.Request) error {
-	id, err := identifier(r, "id")
-	if err != nil {
-		return err
-	}
-	if err = a.Service.Delete(r.Context(), id); err != nil {
-		return err
-	}
-	respond(w, 200, "Item deleted successfully", map[string]string{"id": id}, nil)
-	return nil
-}
-func (a *API) stock(w http.ResponseWriter, r *http.Request) error {
-	id, err := identifier(r, "item_id")
-	if err != nil {
-		return err
-	}
-	x, err := a.Service.Stock(r.Context(), id)
-	if err != nil {
-		return err
-	}
-	respond(w, 200, "Stock retrieved successfully", x, nil)
-	return nil
-}
-func (a *API) receive(w http.ResponseWriter, r *http.Request) error {
-	var in model.ReceiveInput
-	if err := decode(w, r, &in); err != nil {
-		return err
-	}
-	if _, err := model.ParseQuantity(in.Qty); err != nil {
-		return err
-	}
-	if _, err := uuid.Parse(in.ItemID); err != nil {
-		return model.Invalid("item_id", "Use a valid UUID")
-	}
-	if _, err := uuid.Parse(in.LocationID); err != nil {
-		return model.Invalid("location_id", "Use a valid UUID")
-	}
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if len(key) > 128 {
-		return model.Invalid("idempotency_key", "Use at most 128 characters")
-	}
-	x, replay, err := a.Service.Receive(r.Context(), in, key)
-	if err != nil {
-		return err
-	}
-	if replay {
-		w.Header().Set("Idempotency-Replayed", "true")
-	}
-	respond(w, 200, "Stock received successfully", x, nil)
-	return nil
-}
 
 type statusWriter struct {
 	http.ResponseWriter
@@ -267,16 +131,20 @@ func (a *API) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		id := uuid.NewString()
+		logger := requestlog.Logger(r.Context(), a.Logger).With("request_id", id)
+		r = r.WithContext(requestlog.WithLogger(r.Context(), logger))
 		w.Header().Set("X-Request-ID", id)
+		// TimeoutHandler writes directly to this writer without copying its inner headers.
+		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		sw := &statusWriter{w, 200}
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				a.Logger.Error("request.panic", "request_id", id, "panic", recovered)
+				logger.ErrorContext(r.Context(), "request.panic", "panic", recovered)
 				failure(sw, errors.New("internal error"))
 			}
-			a.Logger.Info("http.request", "request_id", id, "method", r.Method, "path", r.URL.Path, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
+			logger.InfoContext(r.Context(), "http.request", "method", r.Method, "path", r.URL.Path, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
 		}()
 		next.ServeHTTP(sw, r)
 	})

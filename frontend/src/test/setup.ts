@@ -1,7 +1,10 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  sessionStorage.clear();
+});
 // JSDOM has no layout engine; Radix observes element sizes in real browsers.
 globalThis.ResizeObserver = class ResizeObserver {
   observe() {}

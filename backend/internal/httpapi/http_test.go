@@ -14,7 +14,7 @@ import (
 )
 
 type brokenStore struct {
-	service.Store
+	service.ItemRepository
 	panicOnList bool
 }
 
@@ -27,7 +27,7 @@ func (s brokenStore) List(context.Context, model.Filter) ([]model.Item, int, err
 func TestSanitizedFailures(t *testing.T) {
 	for _, panicOnList := range []bool{false, true} {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		api := API{Service: &service.Service{Store: brokenStore{panicOnList: panicOnList}, Logger: logger}, Logger: logger, Ping: func(context.Context) error { return errors.New("private readiness error") }}
+		api := API{Items: &ItemHandler{Service: &service.ItemService{Repository: brokenStore{panicOnList: panicOnList}, Logger: logger}}, Logger: logger, Ping: func(context.Context) error { return errors.New("private readiness error") }}
 		w := httptest.NewRecorder()
 		api.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/items", nil))
 		if w.Code != 500 || strings.Contains(w.Body.String(), "private") {
@@ -40,17 +40,20 @@ func TestSanitizedFailures(t *testing.T) {
 		}
 	}
 }
-func TestInvalidRequestsNeverReachService(t *testing.T) {
+func TestInvalidRequestsNeverReachRepository(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	api := API{Service: &service.Service{}, Logger: logger}
+	api := API{Items: &ItemHandler{Service: &service.ItemService{}}, Stock: &StockHandler{Service: &service.StockService{}}, Locations: &LocationHandler{Service: &service.LocationService{}}, Logger: logger}
 	handler := api.Handler()
 	for _, tt := range []struct{ method, path, body, contentType string }{
 		{"POST", "/api/v1/items", `{}`, "text/plain"},
+		{"POST", "/api/v1/items", `{}`, "application/json"},
 		{"POST", "/api/v1/items", `{"sku":"` + strings.Repeat("x", 1<<20) + `"}`, "application/json"},
 		{"POST", "/api/v1/stock/receive", `{"qty":"1.0001"}`, "application/json"},
 		{"GET", "/api/v1/items?search=" + strings.Repeat("a", 201), "", ""},
 		{"GET", "/api/v1/items?category=" + strings.Repeat("a", 101), "", ""},
 		{"GET", "/api/v1/items?page=oops", "", ""},
+		{"GET", "/api/v1/items?page=0", "", ""},
+		{"GET", "/api/v1/items?limit=101", "", ""},
 		{"DELETE", "/api/v1/items/not-uuid", "", ""},
 		{"PUT", "/api/v1/items/not-uuid", `{}`, "application/json"},
 		{"GET", "/api/v1/stock/not-uuid", "", ""},

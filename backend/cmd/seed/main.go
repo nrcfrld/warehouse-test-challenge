@@ -39,17 +39,20 @@ func run(demo bool) error {
 	if err != nil || !demo {
 		return err
 	}
-	svc := &service.Service{Store: &repository.Postgres{Pool: pool}, Logger: slog.Default()}
+	itemRepository := &repository.ItemRepository{Pool: pool}
+	stockRepository := &repository.StockRepository{Pool: pool}
+	itemService := &service.ItemService{Repository: itemRepository}
+	stockService := &service.StockService{Repository: stockRepository, Logger: slog.Default()}
 	samples := []model.ItemInput{{SKU: "PKG-001", Name: "Recycled shipping box", Category: "Packaging", Unit: "pcs"}, {SKU: "RAW-002", Name: "Natural cotton canvas", Category: "Raw materials", Unit: "m"}, {SKU: "SUP-003", Name: "Thermal shipping labels", Category: "Supplies", Unit: "roll"}, {SKU: "PKG-004", Name: "Kraft paper tape", Category: "Packaging", Unit: "roll"}, {SKU: "RAW-005", Name: "Aluminum sheet", Category: "Raw materials", Unit: "kg"}, {SKU: "SUP-006", Name: "Protective work gloves", Category: "Supplies", Unit: "pair"}}
 	for _, in := range samples {
-		item, e := svc.Create(ctx, in)
+		item, e := itemService.Create(ctx, in)
 		if e != nil {
 			if model.Public(e).Status == 409 {
 				continue
 			}
 			return e
 		}
-		if _, _, e = svc.Receive(ctx, model.ReceiveInput{ItemID: item.ID, LocationID: "10000000-0000-4000-8000-000000000001", Qty: "24.500"}, "demo:"+item.SKU); e != nil {
+		if _, _, e = stockService.Receive(ctx, model.ReceiveInput{ItemID: item.ID, LocationID: "10000000-0000-4000-8000-000000000001", Qty: "24.500"}, "demo:"+item.SKU); e != nil {
 			return e
 		}
 	}
