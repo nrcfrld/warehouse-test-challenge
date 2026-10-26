@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/dist
+**/bin
+**/.turbo
+**/coverage
+**/test-results
+**/playwright-report
+**/.env
+**/.env.local
+tmp
+
+**/*.tsbuildinfo

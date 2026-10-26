@@ -1,0 +1,69 @@
+@import "tailwindcss";
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --color-background: #f5f6f8;
+  --color-foreground: #202329;
+  --color-muted: #f3f4f6;
+  --color-muted-foreground: #636b78;
+  --color-border: #e7e9ee;
+  --color-primary: #0069df;
+}
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply m-0 bg-background font-sans text-foreground antialiased;
+  }
+  button,
+  a,
+  select {
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:not(:disabled),
+  select {
+    cursor: pointer;
+  }
+  ::selection {
+    background: #d7e9ff;
+  }
+  input,
+  select,
+  textarea {
+    @apply w-full rounded-xl border bg-white px-3.5 py-3 text-sm outline-none transition-shadow focus:border-blue-400 focus:ring-4 focus:ring-blue-100 disabled:opacity-50;
+  }
+  input[aria-invalid="true"] {
+    @apply border-red-400;
+  }
+  label {
+    @apply mb-2 block text-sm font-medium;
+  }
+  a:focus-visible {
+    @apply rounded-lg outline-none ring-4 ring-blue-200;
+  }
+}
+@layer components {
+  .page {
+    @apply mx-auto w-full max-w-[1280px] px-6 pb-12 pt-10 lg:px-12 lg:pt-12;
+  }
+  .panel {
+    @apply relative overflow-hidden rounded-2xl border bg-white shadow-[0_2px_6px_#19223803];
+  }
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground;
+  }
+  .category-option {
+    @apply flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-sm outline-none data-[selected=true]:bg-blue-50 data-[selected=true]:text-primary;
+  }
+  .field-error {
+    @apply mt-2 text-xs text-red-600;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

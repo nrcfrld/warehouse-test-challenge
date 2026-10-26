@@ -1,0 +1,82 @@
+name: Verify warehouse
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: warehouse-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+        env:
+          POSTGRES_USER: warehouse
+          POSTGRES_PASSWORD: warehouse_test
+          POSTGRES_DB: warehouse_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U warehouse -d warehouse_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:8-alpine@sha256:47b08295737773de3b711fb86f13ae802f5074e96a9a2d29f5f80164ac08c046
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://warehouse:warehouse_test@localhost:5432/warehouse_test?sslmode=disable
+      TEST_REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: npm install --global npm@11.19.1
+      - run: npm ci
+      - run: npm run check:api
+      - run: npm run lint
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: backend
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run test:integration
+      - run: npm run build
+      # Router v6 is a brief requirement; moderate advisories and applicability are documented.
+      - run: npm audit --audit-level=high
+  browser-and-containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --global npm@11.19.1
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: docker compose up --build -d --wait --wait-timeout 180
+      - run: node scripts/smoke.mjs
+      - run: node scripts/smoke-cache.mjs
+      - run: npm run test:e2e
+      - if: failure()
+        run: docker compose logs --no-color
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-results
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+      - if: always()
+        run: docker compose down -v

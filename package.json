@@ -1,0 +1,35 @@
+{
+  "name": "warehouse",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "npm@11.19.1",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "node scripts/tasks.mjs dev",
+    "build": "node scripts/tasks.mjs build",
+    "lint": "node scripts/tasks.mjs lint",
+    "typecheck": "node scripts/tasks.mjs typecheck",
+    "test": "node scripts/tasks.mjs test",
+    "test:integration": "node scripts/tasks.mjs test:integration",
+    "test:e2e": "npm run test:e2e -w @warehouse/frontend",
+    "generate:api": "npm run generate:api -w @warehouse/frontend",
+    "check:api": "npm run lint:api && npm run generate:api && git diff --exit-code -- frontend/src/types/api.generated.ts",
+    "lint:api": "redocly lint backend/docs/openapi.yaml",
+    "db:migrate": "npm run db:migrate -w @warehouse/backend",
+    "db:seed": "npm run db:seed -w @warehouse/backend",
+    "db:demo": "npm run db:demo -w @warehouse/backend",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@redocly/cli": "2.71.0",
+    "prettier": "3.9.10",
+    "turbo": "2.11.10"
+  }
+}

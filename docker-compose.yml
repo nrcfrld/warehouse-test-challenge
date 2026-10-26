@@ -1,0 +1,103 @@
+name: warehouse
+x-api: &api
+  image: warehouse-api:local
+  environment:
+    DATABASE_URL: postgres://${POSTGRES_USER:-warehouse}:${POSTGRES_PASSWORD:-warehouse_local}@db:5432/${POSTGRES_DB:-warehouse}?sslmode=disable
+    PORT: "8080"
+    LOG_LEVEL: INFO
+    REDIS_URL: redis://redis:6379/0
+    REDIS_CACHE_TTL: ${REDIS_CACHE_TTL:-60s}
+services:
+  db:
+    restart: unless-stopped
+    image: postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-warehouse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-warehouse_local}
+      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test:
+        [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  redis:
+    restart: unless-stopped
+    image: redis:8-alpine@sha256:47b08295737773de3b711fb86f13ae802f5074e96a9a2d29f5f80164ac08c046
+    command:
+      [
+        redis-server,
+        --save,
+        "",
+        --appendonly,
+        "no",
+        --maxmemory,
+        64mb,
+        --maxmemory-policy,
+        allkeys-lru,
+      ]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    security_opt: [no-new-privileges:true]
+  migrate:
+    <<: *api
+    command: [/app/migrate]
+    depends_on:
+      db: { condition: service_healthy }
+  seed:
+    <<: *api
+    command: [/app/seed]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+  backend:
+    restart: unless-stopped
+    <<: *api
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      redis: { condition: service_started }
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  frontend:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8088}:8080"
+    depends_on:
+      backend: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+  demo:
+    <<: *api
+    profiles: [demo]
+    command: [/app/seed, -demo]
+    depends_on:
+      seed: { condition: service_completed_successfully }
+volumes:
+  postgres_data:

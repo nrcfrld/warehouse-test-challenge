@@ -1,0 +1,7 @@
+node_modules
+frontend/dist
+frontend/src/types/api.generated.ts
+frontend/playwright-report
+frontend/test-results
+backend/docs/openapi.yaml
+package-lock.json

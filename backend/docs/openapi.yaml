@@ -1,0 +1,1090 @@
+openapi: 3.0.3
+info:
+  title: Warehouse API
+  version: 1.0.0
+  description: >-
+    Warehouse item management. Local/internal use without authentication. All quantities are exact decimal
+    strings; timestamps are UTC. List order is created_at DESC, id DESC. Deleted items are not accessible
+    through operational endpoints.
+  license:
+    name: UNLICENSED
+servers:
+  - url: /
+security: []
+tags:
+  - name: Items
+    description: Active warehouse master data and reference lists
+  - name: Stock
+    description: Exact inventory balances and receipts
+  - name: Locations
+    description: Storage location metadata
+paths:
+  /api/v1/items:
+    get:
+      operationId: listItems
+      summary: List active items with literal case-insensitive search
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/listItemsResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      parameters:
+        - in: query
+          name: search
+          schema:
+            type: string
+            maxLength: 200
+        - in: query
+          name: category
+          schema:
+            type: string
+            maxLength: 100
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+    post:
+      operationId: createItem
+      summary: Create an item with a globally unique normalized SKU
+      tags:
+        - Items
+      responses:
+        '201':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/createItemResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '413':
+          $ref: '#/components/responses/413'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ItemInput'
+  /api/v1/items/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getItem
+      summary: Get an active item
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/getItemResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+    put:
+      operationId: updateItem
+      summary: Replace item metadata (no quantity conversion)
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/updateItemResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '413':
+          $ref: '#/components/responses/413'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ItemInput'
+    delete:
+      operationId: deleteItem
+      summary: Soft-delete an item, preserving its SKU, balances and audit history
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/deleteItemResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+  /api/v1/stock/{item_id}:
+    get:
+      operationId: getStock
+      summary: Get stock at every occupied location for an active item
+      tags:
+        - Stock
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/getStockResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      parameters:
+        - in: path
+          name: item_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+  /api/v1/stock/receive:
+    post:
+      operationId: receiveStock
+      summary: Atomically receive positive stock
+      tags:
+        - Stock
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/receiveStockResponse'
+          headers:
+            Idempotency-Replayed:
+              description: Present and true when a previous result was replayed
+              schema:
+                type: boolean
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '413':
+          $ref: '#/components/responses/413'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReceiveInput'
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+          description: >-
+            Optional key for safe retries. Identical canonical payload replays the original result, even after
+            item deletion. A changed payload returns 409. Without a key each request is a new receipt.
+  /api/v1/locations:
+    get:
+      operationId: listLocations
+      summary: List all locations ordered by code
+      tags:
+        - Locations
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/listLocationsResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+    post:
+      operationId: createLocation
+      summary: Create a storage location
+      tags:
+        - Locations
+      responses:
+        '201':
+          description: Location saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/createLocationResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '413':
+          $ref: '#/components/responses/413'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationInput'
+      description: >-
+        Code is trimmed and uppercased and must be unique case-insensitively. Zone and type are required.
+        Editing preserves the location ID and all stock references.
+  /api/v1/categories:
+    get:
+      operationId: listCategories
+      summary: List distinct categories across all active items
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/listCategoriesResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+  /health/live:
+    get:
+      operationId: liveness
+      summary: Process liveness
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/livenessResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+  /health/ready:
+    get:
+      operationId: readiness
+      summary: Database connectivity
+      tags:
+        - Items
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/readinessResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+  /api/v1/stock/transfer:
+    post:
+      operationId: transferStock
+      summary: Atomically transfer stock between distinct locations
+      tags:
+        - Stock
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/transferStockResponse'
+          headers:
+            Idempotency-Replayed:
+              description: Present and true when a previous result was replayed
+              schema:
+                type: boolean
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '413':
+          $ref: '#/components/responses/413'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferInput'
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+          description: >-
+            Optional key shared across receipt and transfer operations. The same canonical transfer payload
+            replays the original result, including after deletion; a different payload or operation returns
+            409. Without a key each request is a new transfer.
+      description: >-
+        Locks the active item, checks source stock, subtracts and adds exact quantities, and writes one
+        transfer audit record in the same transaction. Insufficient source stock or destination overflow
+        returns 409 and rolls back both balances. Total stock is unchanged.
+  /api/v1/locations/{id}:
+    put:
+      operationId: updateLocation
+      summary: Replace location metadata
+      tags:
+        - Locations
+      responses:
+        '200':
+          description: Location saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/updateLocationResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '404':
+          $ref: '#/components/responses/404'
+        '409':
+          $ref: '#/components/responses/409'
+        '413':
+          $ref: '#/components/responses/413'
+        '500':
+          $ref: '#/components/responses/500'
+        '503':
+          $ref: '#/components/responses/503'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationInput'
+      description: >-
+        Code is trimmed and uppercased and must be unique case-insensitively. Zone and type are required.
+        Editing preserves the location ID and all stock references.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+components:
+  schemas:
+    ItemInput:
+      type: object
+      additionalProperties: false
+      required:
+        - sku
+        - name
+        - category
+        - unit
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        category:
+          type: string
+          minLength: 1
+          maxLength: 100
+        unit:
+          type: string
+          minLength: 1
+          maxLength: 32
+    Item:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - sku
+        - name
+        - category
+        - unit
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        category:
+          type: string
+          minLength: 1
+          maxLength: 100
+        unit:
+          type: string
+          minLength: 1
+          maxLength: 32
+        created_at:
+          type: string
+          format: date-time
+    Location:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - code
+        - zone
+        - type
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+        zone:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: string
+          minLength: 1
+          maxLength: 50
+    Stock:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - location
+        - qty
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        location:
+          $ref: '#/components/schemas/Location'
+        qty:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Exact decimal string. Receipts must be positive. Maximum 999999999999999.999. No rounding is
+            performed.
+        updated_at:
+          type: string
+          format: date-time
+    StockSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - item_id
+        - unit
+        - total
+        - locations
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        unit:
+          type: string
+        total:
+          type: string
+          pattern: ^[0-9]+\.[0-9]{3}$
+          example: '0.300'
+        locations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Stock'
+    ReceiveInput:
+      type: object
+      additionalProperties: false
+      required:
+        - item_id
+        - location_id
+        - qty
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        location_id:
+          type: string
+          format: uuid
+        qty:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Exact decimal string. Receipts must be positive. Maximum 999999999999999.999. No rounding is
+            performed.
+    Receipt:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - item_id
+        - location_id
+        - qty
+        - balance
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        item_id:
+          type: string
+          format: uuid
+        location_id:
+          type: string
+          format: uuid
+        qty:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Exact decimal string. Receipts must be positive. Maximum 999999999999999.999. No rounding is
+            performed.
+        balance:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Exact decimal string. Receipts must be positive. Maximum 999999999999999.999. No rounding is
+            performed.
+        created_at:
+          type: string
+          format: date-time
+    Meta:
+      type: object
+      additionalProperties: false
+      required:
+        - page
+        - limit
+        - total
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total:
+          type: integer
+          minimum: 0
+    Error:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - errors
+      properties:
+        success:
+          type: boolean
+          enum:
+            - false
+        message:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - field
+              - reason
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
+    listItemsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+        - meta
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Item'
+        meta:
+          $ref: '#/components/schemas/Meta'
+    createItemResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Item'
+    getItemResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Item'
+    updateItemResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Item'
+    deleteItemResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - id
+          properties:
+            id:
+              type: string
+              format: uuid
+    getStockResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/StockSummary'
+    receiveStockResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Receipt'
+    listLocationsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Location'
+    listCategoriesResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          type: array
+          items:
+            type: string
+    livenessResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - status
+          properties:
+            status:
+              type: string
+    readinessResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          type: object
+          additionalProperties: false
+          required:
+            - status
+          properties:
+            status:
+              type: string
+    LocationInput:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - zone
+        - type
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+        zone:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: string
+          minLength: 1
+          maxLength: 50
+    TransferInput:
+      type: object
+      additionalProperties: false
+      required:
+        - item_id
+        - from_location_id
+        - to_location_id
+        - qty
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        from_location_id:
+          type: string
+          format: uuid
+        to_location_id:
+          type: string
+          format: uuid
+        qty:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Positive exact decimal string, at most 15 integer and 3 fractional digits. Transfers cannot exceed
+            the source balance.
+    Transfer:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - item_id
+        - from_location_id
+        - to_location_id
+        - qty
+        - source_balance
+        - destination_balance
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        item_id:
+          type: string
+          format: uuid
+        from_location_id:
+          type: string
+          format: uuid
+        to_location_id:
+          type: string
+          format: uuid
+        qty:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Positive exact decimal string, at most 15 integer and 3 fractional digits. Transfers cannot exceed
+            the source balance.
+        source_balance:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Exact decimal string. Receipts must be positive. Maximum 999999999999999.999. No rounding is
+            performed.
+        destination_balance:
+          type: string
+          pattern: ^[0-9]{1,15}(\.[0-9]{1,3})?$
+          example: '1.250'
+          description: >-
+            Exact decimal string. Receipts must be positive. Maximum 999999999999999.999. No rounding is
+            performed.
+        created_at:
+          type: string
+          format: date-time
+    createLocationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Location'
+    updateLocationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Location'
+    transferStockResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - data
+      properties:
+        success:
+          type: boolean
+          enum:
+            - true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Transfer'
+  responses:
+    '400':
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    '404':
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    '409':
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    '413':
+      description: Request body exceeds the reverse proxy limit
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    '500':
+      description: Unexpected failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    '503':
+      description: Unavailable or timed out
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
