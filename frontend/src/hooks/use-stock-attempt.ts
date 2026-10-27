@@ -1,4 +1,5 @@
 import { useMemo, useSyncExternalStore } from "react";
+import { createIdempotencyKey } from "@/lib/idempotency-key";
 import {
   savedStockOperation,
   type SavedStockOperation,
@@ -76,7 +77,7 @@ export function useStockAttempt<K extends Operation>(
     const next = savedStockOperation.parse({
       operation,
       input,
-      key: crypto.randomUUID(),
+      key: createIdempotencyKey(),
     }) as Attempt<K>;
     try {
       sessionStorage.setItem(storageKey, JSON.stringify(next));

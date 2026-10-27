@@ -12,3 +12,5 @@ backend/bin/
 tmp/
 *.tsbuildinfo
 *.dump
+/DEPLOYMENT.local.md
+*.pem

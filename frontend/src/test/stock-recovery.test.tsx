@@ -28,6 +28,7 @@ beforeAll(() => server.listen());
 afterEach(() => {
   server.resetHandlers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 afterAll(() => server.close());
 
@@ -92,6 +93,12 @@ async function fill(operation: "receive" | "transfer") {
 it.each(["receive", "transfer"] as const)(
   "recovers a %s with the same key and payload after remount, even when lookups fail",
   async (operation) => {
+    // Public HTTP exposes getRandomValues, but not randomUUID.
+    vi.stubGlobal("crypto", {
+      getRandomValues: globalThis.crypto.getRandomValues.bind(
+        globalThis.crypto,
+      ),
+    });
     const requests: { key: string | null; input: unknown }[] = [];
     const committed = new Set<string | null>();
     server.use(

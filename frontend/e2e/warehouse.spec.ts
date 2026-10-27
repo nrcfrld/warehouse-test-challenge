@@ -7,6 +7,9 @@ for (const operation of ["receive", "transfer"] as const) {
     page,
     request,
   }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window.crypto, "randomUUID", { value: undefined });
+    });
     const created = await request.post("/api/v1/items", {
       data: {
         sku: `RECOVERY-${randomUUID()}`,
@@ -42,6 +45,9 @@ for (const operation of ["receive", "transfer"] as const) {
         }
       });
       await page.goto(`/items/${item.id}`);
+      expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe(
+        "undefined",
+      );
       const title =
         operation === "receive" ? "Receive stock" : "Transfer stock";
       await page.getByRole("button", { name: title, exact: true }).click();
