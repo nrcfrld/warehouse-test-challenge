@@ -25,19 +25,28 @@ try {
   });
   assert.equal(restart.status, 0);
   let ready = false;
+  let lastProbe = "No readiness response";
   for (let i = 0; i < 30; i++) {
     try {
-      const response = await fetch(`${base}/health/ready`);
+      const response = await fetch(`${base}/health/ready`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      lastProbe = `HTTP ${response.status}: ${await response.text()}`;
       if (response.ok) {
         ready = true;
         break;
       }
-    } catch {
+    } catch (error) {
+      lastProbe = error.message;
       /* transient restart connection */
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  assert.equal(ready, true, "Backend did not recover after restart");
+  assert.equal(
+    ready,
+    true,
+    `Application did not recover through Nginx after restart. Last probe: ${lastProbe}`,
+  );
   assert.equal((await request(`/api/v1/items/${id}`)).data.id, id);
   // A bad database target must fail migration rather than report success.
   const invalid = spawnSync(
